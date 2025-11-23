@@ -1,0 +1,5 @@
+{
+  "name": "CodeStrike - DSA Tracker",
+  "description": "A dedicated LeetCode consistency tracker that sets goals, monitors progress, and uses AI to analyze the impact of missed targets on your coding interview preparation.",
+  "requestFramePermissions": []
+}
