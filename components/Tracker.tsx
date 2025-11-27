@@ -10,7 +10,7 @@ interface Props {
 
 const Tracker: React.FC<Props> = ({ onUpdate, onSyncComplete }) => {
   const [loading, setLoading] = useState(false);
-  
+       
   // Store count for the current session
   const [sessionCount, setSessionCount] = useState(0);
   const [username, setUsername] = useState('');
@@ -133,4 +133,4 @@ const Tracker: React.FC<Props> = ({ onUpdate, onSyncComplete }) => {
   );
 };
 
-export default Tracker;
+export default Tracker; 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { INITIAL_STATE, UserState, Platform, DailyLog, Goal } from './types';
 import Dashboard from './components/Dashboard';
 import Tracker from './components/Tracker';
@@ -13,7 +13,7 @@ import { LayoutDashboard, Target, Code2, Trophy, Zap, Timer, X, Ghost, Menu, Che
 
 // Supabase Integration
 import { supabase } from './lib/supabase';
-import { fetchFullUserState, updateProfileStats, updateGoalProgress, addOrUpdateLog, updateGoalDetails, deleteAccount } from "./services/dbServices";
+import { fetchFullUserState, updateProfileStats, updateGoalProgress, addOrUpdateLog, updateGoalDetails, deleteAccount } from './services/dbService';
 import { Session } from '@supabase/supabase-js';
 
 const App: React.FC = () => {
@@ -39,27 +39,42 @@ const App: React.FC = () => {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
 
+  // Ref to track if data has been loaded initially to prevent layout shifts/reloads
+  const initialLoadComplete = useRef(false);
+
   // --- Auth & Data Loading ---
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
-      if (session) loadUserData(session.user.id);
-      else setLoading(false);
+      if (session) {
+          loadUserData(session.user.id, false);
+      } else {
+          setLoading(false);
+          initialLoadComplete.current = true;
+      }
     });
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
-      if (session) loadUserData(session.user.id);
-      else setLoading(false);
+      if (session) {
+          // If we have already loaded initially, do a background update (silent)
+          // otherwise do a full load with spinner
+          const isBackground = initialLoadComplete.current;
+          loadUserData(session.user.id, isBackground);
+      } else {
+          setLoading(false);
+          initialLoadComplete.current = true;
+      }
     });
 
     return () => subscription.unsubscribe();
   }, []);
 
-  const loadUserData = async (userId: string) => {
-    setLoading(true);
+  const loadUserData = async (userId: string, isBackgroundUpdate: boolean) => {
+    if (!isBackgroundUpdate) setLoading(true);
+    
     const userState = await fetchFullUserState(userId);
     if (userState) {
       setState(userState);
@@ -76,12 +91,17 @@ const App: React.FC = () => {
         setManualSolvedToday(0);
       }
     }
-    setLoading(false);
+    
+    if (!isBackgroundUpdate) {
+        setLoading(false);
+        initialLoadComplete.current = true;
+    }
   };
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
     setState(INITIAL_STATE);
+    initialLoadComplete.current = false;
   };
 
   const handleDeleteAccount = async () => {
@@ -91,6 +111,7 @@ const App: React.FC = () => {
       await supabase.auth.signOut();
       setState(INITIAL_STATE);
       setShowDeleteConfirm(false);
+      initialLoadComplete.current = false;
     } catch (error) {
       console.error("Failed to delete account:", error);
       alert("Failed to delete account. Please try again.");
@@ -102,9 +123,10 @@ const App: React.FC = () => {
   // --- Helpers ---
   
   /**
-   * robustly calculates streak from logs
+   * robustly calculates streak from logs.
+   * STRICT MODE: Only increments if solvedCount >= dailyTarget
    */
-  const calculateStreak = (logs: DailyLog[]): number => {
+  const calculateStreak = (logs: DailyLog[], target: number): number => {
     // 1. Group logs by date to handle multiple entries per day (Manual + API)
     const activityMap = new Map<string, number>();
     logs.forEach(l => {
@@ -123,14 +145,14 @@ const App: React.FC = () => {
     let checkDate = new Date(today);
 
     // Determine start point:
-    // If we have activity today, streak includes today.
-    // If not today, but we had activity yesterday, streak is still alive (just hasn't incremented for today yet).
-    // If neither, streak is broken (0).
+    const todayCount = activityMap.get(todayStr) || 0;
+    const yesterdayCount = activityMap.get(yesterdayStr) || 0;
 
-    if ((activityMap.get(todayStr) || 0) > 0) {
-        // Active today
-    } else if ((activityMap.get(yesterdayStr) || 0) > 0) {
-        // Not active today yet, but active yesterday. Start checking from yesterday.
+    // Strict Rule: Streak only counts if you met the target
+    if (todayCount >= target) {
+        // Target met today, streak includes today
+    } else if (yesterdayCount >= target) {
+        // Target NOT met today yet, but met yesterday. Streak is safe, but doesn't include today yet.
         checkDate.setDate(checkDate.getDate() - 1);
     } else {
         return 0; // Streak broken
@@ -139,7 +161,9 @@ const App: React.FC = () => {
     // Count backwards
     while (true) {
         const dateStr = checkDate.toISOString().split('T')[0];
-        if ((activityMap.get(dateStr) || 0) > 0) {
+        const count = activityMap.get(dateStr) || 0;
+        
+        if (count >= target) {
             currentStreak++;
             checkDate.setDate(checkDate.getDate() - 1);
         } else {
@@ -161,7 +185,7 @@ const App: React.FC = () => {
   }, [totalSolvedToday, state.dailyTarget]);
 
   useEffect(() => {
-    if (!loading && session) {
+    if (!loading && session && initialLoadComplete.current) {
         const timer = setTimeout(() => setShowGuide(true), 1000);
         const autoDismiss = setTimeout(() => setShowGuide(false), 11000); 
         return () => {
@@ -194,8 +218,8 @@ const App: React.FC = () => {
         logEntry
     ];
 
-    // Calculate new Streak
-    const newStreak = calculateStreak(updatedLogs);
+    // Calculate new Streak using current daily target
+    const newStreak = calculateStreak(updatedLogs, state.dailyTarget);
 
     // DB Updates
     await updateProfileStats(session.user.id, { totalSolved: newTotalSolved, streak: newStreak });
@@ -239,8 +263,8 @@ const App: React.FC = () => {
     // Construct full log history for streak calc (API logs + Manual logs)
     const mergedLogs = [...data.logs, ...existingManualLogs];
     
-    // Calculate Streak
-    const streak = calculateStreak(mergedLogs);
+    // Calculate Streak using current daily target
+    const streak = calculateStreak(mergedLogs, state.dailyTarget);
 
     // Update DB
     await updateProfileStats(session.user.id, { totalSolved: newTotalSolved, streak });
